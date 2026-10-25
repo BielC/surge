@@ -118,6 +118,8 @@ class LFOModulationSource : public ModulationSource
     Surge::Formula::EvaluatorState formulastate;
 
     inline float getPhase() { return phase; }
+    // Read existing playback state only. Never advance an evaluator for the UI.
+    float getDisplayPosition() const;
     inline int getIntPhase() { return unwrappedphase_intpart; }
     inline int getEnvState() { return env_state; }
     inline int getStep() { return step; }
@@ -158,6 +160,7 @@ class LFOModulationSource : public ModulationSource
     float wf_history[4];
     bool is_display;
     int step, shuffle_id;
+    int displayStep{0};
     int magn, rate, iattack, idecay, idelay, ihold, isustain, irelease, startphase, ideform;
 
     float onepoleState[3];

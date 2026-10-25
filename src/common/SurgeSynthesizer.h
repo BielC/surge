@@ -151,9 +151,12 @@ class alignas(16) SurgeSynthesizer
         std::atomic<uint64_t> snapshot{0};
         std::atomic<unsigned int> generation{0};
 
-        static int selection(int scene, int lfo, int output)
+        static constexpr int selectionCount = n_scenes * n_lfos * max_lfo_indices;
+        static_assert(selectionCount * (n_lfo_types + 1) < 65536);
+        static int selection(int scene, int lfo, int output, int shape = -1)
         {
-            return 1 + (scene * n_lfos + lfo) * max_lfo_indices + output;
+            return 1 + (scene * n_lfos + lfo) * max_lfo_indices + output +
+                   (shape + 1) * selectionCount;
         }
         void publish(int selection, float phase, float value)
         {

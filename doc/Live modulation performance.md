@@ -56,3 +56,17 @@ establish a universal gain. Vanilla source is `f21a8046129edf5e2510772afa3cabc16
 the previous prototype is `886ef9419fdaaf39f65c8131936a40d68b952cd4`.
 Local raw trials, hashes, harness, charts, PCM checks and screenshots are preserved
 under `surge-performance/2026-10-25/optimization/` alongside this checkout.
+
+## Additional LFO shapes
+
+The later extension covers all ten LFO shapes. Noise, sample-and-hold, envelope
+and formula use a bounded 256-sample history on the message thread. The step
+sequencer skips the simulated preview in live mode; MSEG caches one traversal.
+The audio thread reads existing playback state without advancing the modulator
+or allocating memory. Audio with display requests on/off is byte-identical for
+512 blocks per shape in the new regression check.
+
+The table above measured a periodic sine LFO before this extension. Its CPU
+percentages have not been remeasured for the additional shapes. Formula scripts
+and MSEG curves can have different DSP costs, so those percentages should not
+be extrapolated to every waveform or patch.

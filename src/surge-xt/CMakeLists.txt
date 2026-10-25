@@ -18,18 +18,24 @@ juce_add_binary_data(surge-xt-binary
 )
 
 if(WIN32 AND ${CMAKE_SIZEOF_VOID_P} EQUAL 4)
-  set(SURGE_XT_PRODUCT_NAME "Surge XT (32-bit)")
+  set(SURGE_XT_DEFAULT_PRODUCT_NAME "Surge XT (32-bit)")
 else()
-  set(SURGE_XT_PRODUCT_NAME "Surge XT")
+  set(SURGE_XT_DEFAULT_PRODUCT_NAME "Surge XT")
 endif()
+
+# Optional identities let personal builds coexist with the official plugin.
+set(SURGE_XT_PRODUCT_NAME "${SURGE_XT_DEFAULT_PRODUCT_NAME}" CACHE STRING "Synth product name")
+set(SURGE_XT_BUNDLE_ID "org.surge-synth-team.surge-xt" CACHE STRING "Synth bundle identifier")
+set(SURGE_XT_MANUFACTURER_CODE "VmbA" CACHE STRING "Synth four-character manufacturer code")
+set(SURGE_XT_PLUGIN_CODE "SgXT" CACHE STRING "Synth four-character plugin code")
 
 juce_add_plugin(${PROJECT_NAME}
   PRODUCT_NAME ${SURGE_XT_PRODUCT_NAME}
   COMPANY_NAME "Surge Synth Team"
   COMPANY_WEBSITE "https://surge-synth-team.org/"
-  BUNDLE_ID "org.surge-synth-team.surge-xt"
-  PLUGIN_MANUFACTURER_CODE VmbA
-  PLUGIN_CODE SgXT
+  BUNDLE_ID "${SURGE_XT_BUNDLE_ID}"
+  PLUGIN_MANUFACTURER_CODE "${SURGE_XT_MANUFACTURER_CODE}"
+  PLUGIN_CODE "${SURGE_XT_PLUGIN_CODE}"
 
   ICON_BIG "${CMAKE_SOURCE_DIR}/resources/surge-xt/SurgeLogo.png"
 
@@ -64,7 +70,7 @@ juce_add_plugin(${PROJECT_NAME}
 
 if(SURGE_BUILD_CLAP)
   clap_juce_extensions_plugin(TARGET surge-xt
-    CLAP_ID "org.surge-synth-team.surge-xt"
+    CLAP_ID "${SURGE_XT_BUNDLE_ID}"
 
     CLAP_SUPPORTS_CUSTOM_FACTORY 1
     CLAP_FEATURES "instrument" "synthesizer" "stereo" "free and open source")
@@ -271,11 +277,11 @@ if(APPLE)
     POST_BUILD
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     COMMAND echo "Relocating CLI executable into standalone"
-    COMMAND ${CMAKE_COMMAND} -E copy "${cliexe}" "${saname}/Surge XT.app/Contents/MacOS"
+    COMMAND ${CMAKE_COMMAND} -E copy "${cliexe}" "${saname}/${SURGE_XT_PRODUCT_NAME}.app/Contents/MacOS"
   )
 endif()
 
-surge_juce_package(${PROJECT_NAME} "Surge XT")
+surge_juce_package(${PROJECT_NAME} "${SURGE_XT_PRODUCT_NAME}")
 
 if (${SURGE_BUILD_TESTRUNNER})
   add_subdirectory(xt-tests)

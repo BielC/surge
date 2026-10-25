@@ -4792,10 +4792,11 @@ void SurgeSynthesizer::publishLFODisplayState()
     if (lfoDisplayState.request.load(std::memory_order_relaxed) == 0)
         return;
     auto requested = lfoDisplayState.request.exchange(0, std::memory_order_relaxed);
-    if (requested <= 0 || requested > n_scenes * n_lfos * max_lfo_indices)
+    if (requested <= 0 || requested > LFODisplayState::selectionCount * (n_lfo_types + 1))
         return;
 
-    auto index = requested - 1;
+    auto shape = (requested - 1) / LFODisplayState::selectionCount - 1;
+    auto index = (requested - 1) % LFODisplayState::selectionCount;
     auto output = index % max_lfo_indices;
     auto lfo = (index / max_lfo_indices) % n_lfos;
     auto scene = index / (max_lfo_indices * n_lfos);
@@ -4819,9 +4820,10 @@ void SurgeSynthesizer::publishLFODisplayState()
                 static_cast<LFOModulationSource *>(sc.modsources[ms_slfo1 + lfo - n_lfos_voice]);
     }
 
+    auto position = source ? source->getDisplayPosition() : 0.f;
     if (source && source->everAttacked && output < source->get_active_outputs() &&
-        std::isfinite(source->getPhase()))
-        lfoDisplayState.publish(requested, source->getPhase(), source->get_output(output));
+        (shape < 0 || shape == sc.lfo[lfo].shape.val.i) && std::isfinite(position))
+        lfoDisplayState.publish(requested, position, source->get_output(output));
     else
         lfoDisplayState.publish(requested, 0.f, std::numeric_limits<float>::quiet_NaN());
 }

@@ -25,6 +25,7 @@
 
 #include "WidgetBaseMixin.h"
 #include "SurgeStorage.h"
+#include "LFOLiveHistory.h"
 
 #include "juce_gui_basics/juce_gui_basics.h"
 
@@ -45,12 +46,16 @@ struct LFOAndStepDisplay : public juce::Component,
     void paint(juce::Graphics &g) override;
     void paintWaveform(juce::Graphics &g);
     bool supportsLivePosition() const;
+    bool usesLiveHistory() const;
     void updateLivePosition();
     void paintLiveReference(juce::Graphics &g);
     void paintLivePosition(juce::Graphics &g);
+    void addLivePositionMenuItem(juce::PopupMenu &menu);
     bool showLivePosition{true};
     uint64_t liveSnapshot{0};
     unsigned int liveGeneration{0};
+    int liveSelection{0};
+    LFOLiveHistory liveHistory;
     double liveReceivedAt{0};
     double livePolledAt{0};
     bool liveValid{false};

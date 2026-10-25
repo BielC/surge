@@ -363,6 +363,7 @@ void LFOModulationSource::attackFrom(float start)
     case lt_stepseq:
     {
         // fire up the engines
+        displayStep = step & (n_stepseqsteps - 1);
         wf_history[1] = ss->steps[step & (n_stepseqsteps - 1)];
         wf_history[2] = ss->steps[(step + n_stepseqsteps - 1) & (n_stepseqsteps - 1)];
         wf_history[3] = ss->steps[(step + n_stepseqsteps - 2) & (n_stepseqsteps - 1)];
@@ -774,6 +775,7 @@ void LFOModulationSource::process_block()
                 retrigger_AEG = true;
             }
 
+            displayStep = step & (n_stepseqsteps - 1);
             step++;
 
             // make sure we don't blow out ratemult with modulation
@@ -1055,6 +1057,7 @@ void LFOModulationSource::process_block()
             }
 
             pstep = pstep & (n_stepseqsteps - 1);
+            displayStep = pstep;
 
             if (pstep != priorStep)
             {
@@ -1358,4 +1361,44 @@ void LFOModulationSource::completedModulation()
     {
         Surge::Formula::cleanEvaluatorState(formulastate);
     }
+}
+
+float LFOModulationSource::getDisplayPosition() const
+{
+    if (lfo->shape.val.i == lt_stepseq)
+    {
+        auto progress = lfo->rate.deactivated ? std::fmod(phase * n_stepseqsteps, 1.f) : phase;
+        return (displayStep + progress) / n_stepseqsteps;
+    }
+    if (lfo->shape.val.i == lt_envelope)
+        // The trace labels the actual envelope stage, including sustain/release.
+        return (env_state + 0.5f) / (lfoeg_stuck + 1);
+    if (lfo->shape.val.i == lt_mseg)
+    {
+        if (!ms || ms->n_activeSegments <= 0 || ms->totalDuration <= 0)
+            return std::numeric_limits<float>::quiet_NaN();
+        double time = unwrappedphase_intpart + double(phase);
+        if (ms->editMode == MSEGStorage::ENVELOPE)
+        {
+            if (ms->loopMode == MSEGStorage::ONESHOT && time >= ms->totalDuration)
+                return 1.f;
+            if (ms->loopMode == MSEGStorage::GATED_LOOP &&
+                msegstate.loopState == Surge::MSEG::EvaluatorState::RELEASING)
+            {
+                if (ms->loop_end >= 0 && ms->loop_end < ms->n_activeSegments - 1)
+                {
+                    time = ms->segmentEnd[ms->loop_end] + time - msegstate.releaseStartPhase;
+                    return std::clamp(float(time / ms->totalDuration), 0.f, 1.f);
+                }
+                // Gated loops ending at the last point hold their last evaluated position.
+            }
+        }
+        auto segment = msegstate.lastEval;
+        if (segment < 0 || segment >= ms->n_activeSegments)
+            return std::numeric_limits<float>::quiet_NaN();
+        return std::clamp(
+            float((ms->segmentStart[segment] + msegstate.timeAlongSegment) / ms->totalDuration),
+            0.f, 1.f);
+    }
+    return phase;
 }

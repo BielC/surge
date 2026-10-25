@@ -5,6 +5,7 @@ add_executable(${PROJECT_NAME}
         main.cpp
         XTTestOSC.cpp
         XTTestSurgeImageCache.cpp
+        XTTestLFOLiveHistory.cpp
   )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE

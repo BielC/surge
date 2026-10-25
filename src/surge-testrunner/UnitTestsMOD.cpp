@@ -1725,6 +1725,178 @@ TEST_CASE("Live LFO display samples the engine without changing audio", "[mod][l
     }
 }
 
+TEST_CASE("Live LFO snapshots cover every shape and reject old shape requests",
+          "[mod][lfo-display]")
+{
+    using Display = SurgeSynthesizer::LFODisplayState;
+    for (int shape = lt_sine; shape < n_lfo_types; ++shape)
+    {
+        INFO(lt_names[shape]);
+        auto surge = surgeOnSine();
+        auto &lfo = surge->storage.getPatch().scene[0].lfo[0];
+        lfo.shape.val.i = shape;
+        surge->playNote(0, 60, 100, 0);
+        auto &state = surge->lfoDisplayState;
+        auto selection = Display::selection(0, 0, 0, shape);
+        for (int block = 0; block < 32; ++block)
+        {
+            state.request.store(selection);
+            surge->process();
+            auto snapshot = state.snapshot.load();
+            auto source =
+                static_cast<LFOModulationSource *>(surge->voices[0].front()->modsources[ms_lfo1]);
+            REQUIRE(int(snapshot >> 48) == selection);
+            REQUIRE(std::isfinite(Display::value(snapshot)));
+            REQUIRE(Display::value(snapshot) == source->get_output(0));
+            REQUIRE(Display::phase(snapshot) ==
+                    Approx(source->getDisplayPosition()).margin(1.f / 65535.f));
+            auto phase = source->getPhase();
+            auto output = source->get_output(0);
+            float audio[2][BLOCK_SIZE];
+            std::memcpy(audio, surge->output, sizeof(audio));
+            for (int read = 0; read < 8; ++read)
+            {
+                state.request.store(selection);
+                surge->publishLFODisplayState();
+            }
+            REQUIRE(source->getPhase() == phase);
+            REQUIRE(source->get_output(0) == output);
+            REQUIRE(std::memcmp(audio, surge->output, sizeof(audio)) == 0);
+        }
+        state.request.store(Display::selection(0, 0, 0, (shape + 1) % n_lfo_types));
+        surge->process();
+        REQUIRE(std::isnan(Display::value(state.snapshot.load())));
+    }
+}
+
+TEST_CASE("Live step position follows loop playback and rate-zero scrubbing", "[mod][lfo-display]")
+{
+    auto surge = surgeOnSine();
+    auto &patch = surge->storage.getPatch();
+    auto &lfo = patch.scene[0].lfo[0];
+    auto &seq = patch.stepsequences[0][0];
+    lfo.shape.val.i = lt_stepseq;
+    lfo.rate.val.f = 4;
+    lfo.deform.val.f = 0;
+    lfo.trigmode.val.i = lm_keytrigger;
+    for (int i = 0; i < n_stepseqsteps; ++i)
+        seq.steps[i] = float(i) / n_stepseqsteps;
+    SECTION("Loop playback follows the current value, not the next prefetched step")
+    {
+        seq.loop_start = 3;
+        seq.loop_end = 6;
+        surge->playNote(0, 60, 100, 0);
+        std::set<int> visited;
+        for (int block = 0; block < 6000; ++block)
+        {
+            surge->process();
+            auto source =
+                static_cast<LFOModulationSource *>(surge->voices[0].front()->modsources[ms_lfo1]);
+            auto position = source->getDisplayPosition();
+            int step = std::clamp(int(position * n_stepseqsteps), 0, n_stepseqsteps - 1);
+            visited.insert(step);
+            if (source->getPhase() > 0.01f)
+                REQUIRE(source->get_output(1) == Approx(seq.steps[step]));
+            if (block > 2000)
+                REQUIRE((step >= seq.loop_start && step <= seq.loop_end));
+        }
+        REQUIRE(visited.count(3) == 1);
+        REQUIRE(visited.count(6) == 1);
+        REQUIRE(visited.count(7) == 0);
+    }
+    SECTION("Deactivated rate maps phase to all sixteen steps")
+    {
+        lfo.rate.deactivated = true;
+        seq.loop_start = 0;
+        seq.loop_end = 15;
+        surge->playNote(0, 60, 100, 0);
+        for (int step = 0; step < n_stepseqsteps; ++step)
+        {
+            lfo.start_phase.val.f = (step + .25f) / n_stepseqsteps;
+            for (int block = 0; block < 4; ++block)
+                surge->process();
+            auto source =
+                static_cast<LFOModulationSource *>(surge->voices[0].front()->modsources[ms_lfo1]);
+            REQUIRE(source->getDisplayPosition() == Approx(lfo.start_phase.val.f));
+            REQUIRE(source->get_output(1) == Approx(seq.steps[step]));
+        }
+    }
+}
+
+TEST_CASE("Live MSEG position holds at the endpoint after one-shot and gated release",
+          "[mod][lfo-display]")
+{
+    auto surge = surgeOnSine();
+    auto &patch = surge->storage.getPatch();
+    auto &lfo = patch.scene[0].lfo[0];
+    auto &mseg = patch.msegs[0][0];
+    lfo.shape.val.i = lt_mseg;
+    lfo.rate.val.f = 0;
+    lfo.trigmode.val.i = lm_keytrigger;
+    patch.scene[0].adsr[0].r.val.f = 2;
+    Surge::MSEG::createInitVoiceMSEG(&mseg);
+    mseg.editMode = MSEGStorage::ENVELOPE;
+    mseg.n_activeSegments = 2;
+    mseg.segments[0].duration = .125f;
+    mseg.segments[1].duration = .125f;
+    mseg.loop_start = 0;
+    mseg.loop_end = 0;
+    SECTION("One-shot") { mseg.loopMode = MSEGStorage::ONESHOT; }
+    SECTION("Gated release") { mseg.loopMode = MSEGStorage::GATED_LOOP; }
+    Surge::MSEG::rebuildCache(&mseg);
+    surge->playNote(0, 60, 100, 0);
+    for (int block = 0; block < 800; ++block)
+    {
+        if (block == 300)
+            surge->releaseNote(0, 60, 0);
+        surge->process();
+        auto source =
+            static_cast<LFOModulationSource *>(surge->voices[0].front()->modsources[ms_lfo1]);
+        REQUIRE(source->getDisplayPosition() >= 0.f);
+        REQUIRE(source->getDisplayPosition() <= 1.f);
+        if (block == 50)
+        {
+            REQUIRE(source->getDisplayPosition() > 0.f);
+            REQUIRE(source->getDisplayPosition() < .5f);
+        }
+        if (block > 700)
+            REQUIRE(source->getDisplayPosition() == 1.f);
+    }
+}
+
+TEST_CASE("Live display requests preserve rendered audio for every LFO shape", "[mod][lfo-display]")
+{
+    for (int shape = lt_sine; shape < n_lfo_types; ++shape)
+    {
+        INFO(lt_names[shape]);
+        auto setup = [shape]() {
+            auto synth = surgeOnSine();
+            auto &sc = synth->storage.getPatch().scene[0];
+            synth->storage.rngGen.g.seed(1701);
+            synth->storage.noiseRng.reseed(1701);
+            sc.drift.val.f = 0;
+            for (auto &osc : sc.osc)
+                osc.retrigger.val.b = true;
+            sc.lfo[0].shape.val.i = shape;
+            sc.lfo[0].trigmode.val.i = lm_keytrigger;
+            REQUIRE(synth->setModDepth01(sc.pitch.id, ms_lfo1, 0, 0, .1f));
+            synth->playNote(0, 60, 100, 0);
+            return synth;
+        };
+        auto reference = setup();
+        auto displayed = setup();
+        for (int block = 0; block < 512; ++block)
+        {
+            displayed->lfoDisplayState.request.store(
+                SurgeSynthesizer::LFODisplayState::selection(0, 0, 0, shape));
+            reference->process();
+            displayed->process();
+            REQUIRE(std::memcmp(reference->output, displayed->output, sizeof(reference->output)) ==
+                    0);
+        }
+    }
+}
+
 // Run explicitly with surge-testrunner "[lfo-display-perf]".
 TEST_CASE("Live LFO snapshot cost", "[.][lfo-display-perf]")
 {

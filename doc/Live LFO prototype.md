@@ -46,7 +46,8 @@ build/src/surge-testrunner/surge-testrunner '[parameter-display-perf]' --benchma
 
 ## LFO waveform marker
 
-Sine, triangle, square and saw LFOs show a moving dot and a numeric live value.
+All ten LFO types now have a live view. Sine, triangle, square and saw LFOs show
+a moving dot and a numeric live value.
 The horizontal axis is the oscillator phase. The curve is a cached one-cycle
 reference before the LFO envelope and parameter modulation; the dot includes both.
 Envelope or amplitude modulation can therefore move the dot away from the curve.
@@ -59,15 +60,35 @@ Inactive sources and audio engines that stop responding hide the dot.
 
 Right-click the waveform and disable **Show Live LFO Position** to return to the
 original envelope preview. This switch lasts for the current editor session.
-Noise, sample-and-hold, envelope, step sequencer, MSEG and formula retain their
-original previews in this first version. Fast LFOs can alias visually at the UI
-refresh rate; this display is intended mainly for slow modulation.
+Noise, sample-and-hold, envelope and formula show the last eight seconds of actual
+output with the current value at the right edge. Sample-and-hold uses a stepped
+trace, and the envelope also names its current stage. History is collected on the
+message thread in a fixed 256-sample buffer. Switching scene, source, shape or
+output, editing the reference parameters, and stale/invalid data reset the trace.
+An editor that resumes after a pause discards its old pending snapshot.
+
+The step sequencer highlights the currently playing step and shows a moving
+position/output dot over its editable bars. Loop bounds, shuffle and rate-zero
+scrubbing use the engine's playback state. Its expensive simulated preview runs
+only when live display is disabled. Step and trigger editing remain available.
+
+MSEG shows one pass over its custom curve with the actual position/output dot.
+The position follows segment time, loop playback and gated release. Completed
+one-shot and release traversals hold at the endpoint; a gated loop with no
+release segment holds its last evaluated position. The cached curve precedes the live
+LFO envelope and amplitude. Stochastic MSEG segments are a reference, so the
+actual dot can differ. Clicking the preview still opens the MSEG/formula editor;
+the live toggle is added to their existing menus and the step-value menu.
+
+All views sample at about 30 Hz. Fast changes can be missed or alias visually;
+these views are intended mainly for slow modulation. They show the selected
+output of the newest held/releasing voice, rather than every voice at once.
 
 ## Implementation
 
 The editor requests one selected source at about 30 Hz. After processing a block,
 the audio thread reads its existing phase/output and publishes one packed,
-lock-free atomic snapshot, tagged with scene, LFO and output index. No voice
+lock-free atomic snapshot, tagged with scene, LFO, output index and shape. No voice
 pointers cross threads. Sampling does not process the LFO, allocate or take a lock.
 When the editor is inactive there is one relaxed atomic load per audio block.
 The reference curve is rebuilt only when parameters or the display change.
@@ -80,16 +101,29 @@ broader realtime waveform request in
 ## Checks
 
 Built the ARM64 Release standalone and VST3 on macOS, with plugin copying disabled.
-The optimized standalone is copied to
-`~/Applications/Surge XT LFO Optimized.app` with its own bundle identifier and a
-verified ad-hoc signature. It opens alongside the previous prototype, preserving
-that app's unsaved patch. The VST3 has not been installed or tested in a DAW.
+The personal VST3 is installed as
+`~/Library/Audio/Plug-Ins/VST3/mySurgeXT.vst3`, with bundle identifier
+`org.bielc.mysurgext`, manufacturer code `Biel` and plugin code `Msur`.
+These compiled identities let hosts distinguish it from official Surge XT.
+Its ad-hoc signature and installed binary hash were verified. Only the VST3 was
+installed; existing standalone apps and official plugins were preserved.
+Tracktion pluginval 1.0.4 passed at strictness 5, including editor opening during
+processing, automation and state restoration, at 44.1/48 kHz and 64/512-sample
+blocks. Loading it in Ableton remains a manual check after rescanning plugins.
+This build is ARM64 and requires a native Apple Silicon host.
 
-The modulation suite passed all 17 test cases. The parameter and LFO display
-checks passed 101 assertions, and the new artwork-cache tests passed 21 assertions.
+The modulation suite passed all 21 test cases (about 1.49 million assertions).
+The parameter and LFO display checks passed 20,936 assertions in six cases,
+including all shapes, stale shape requests, step loops/scrubbing, MSEG endpoints
+and byte-identical audio with display requests on/off for 512 blocks per shape.
+History and artwork-cache checks passed 40 assertions in four cases, including
+joined/stepped trace geometry, bounded history and stale sample resets.
 The GUI was checked with a slow 0.125 Hz LFO, including moving LFO/parameter dots,
-sine-to-triangle selection, cutoff changes and modulation editing. The optimized
-standalone also opens with the Purple skin. Native automation could not confirm
+sine-to-triangle selection, cutoff changes and modulation editing. New native
+checks confirmed noise and sample-and-hold traces, envelope output/stage text,
+formula output, moving step markers with editable step values, MSEG playback
+position, and access to both formula and MSEG editors. The optimized standalone
+also opens with the Purple skin. Native automation could not confirm
 the context-menu toggle or interactive zoom, so those remain manual checks.
 Pre-commit could not run because upstream has no `.pre-commit-config.yaml`;
 C++ formatting and `git diff --check` passed.
@@ -110,3 +144,17 @@ cmake --build build --target surge-xt_Standalone surge-xt_VST3 surge-testrunner 
 build/src/surge-testrunner/surge-testrunner '[mod]'
 build/src/surge-testrunner/surge-testrunner '[lfo-display-perf]' --benchmark-samples 30
 ```
+
+To reproduce the separately identified personal VST3 (defaults retain official
+Surge XT naming and identity):
+
+```sh
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_LTO=OFF -DSURGE_COPY_AFTER_BUILD=OFF \
+  -DSURGE_XT_PRODUCT_NAME=mySurgeXT -DSURGE_XT_BUNDLE_ID=org.bielc.mysurgext \
+  -DSURGE_XT_MANUFACTURER_CODE=Biel -DSURGE_XT_PLUGIN_CODE=Msur
+cmake --build build --target surge-xt_VST3 --parallel 8
+```
+
+The personal plugin shares Surge's patch library and preferences. Ableton projects
+using official Surge XT continue to refer to that plugin; load mySurgeXT as a new
+instrument and use saved Surge patches to transfer sounds.

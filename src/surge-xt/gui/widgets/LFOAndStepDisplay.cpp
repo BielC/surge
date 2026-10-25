@@ -449,7 +449,13 @@ void LFOAndStepDisplay::resized()
 
 bool LFOAndStepDisplay::supportsLivePosition() const
 {
-    return lfodata && lfodata->shape.val.i >= lt_sine && lfodata->shape.val.i <= lt_ramp;
+    return lfodata && lfodata->shape.val.i >= lt_sine && lfodata->shape.val.i < n_lfo_types;
+}
+
+bool LFOAndStepDisplay::usesLiveHistory() const
+{
+    auto shape = lfodata->shape.val.i;
+    return shape == lt_noise || shape == lt_snh || shape == lt_envelope || shape == lt_formula;
 }
 
 void LFOAndStepDisplay::updateLivePosition()
@@ -460,15 +466,33 @@ void LFOAndStepDisplay::updateLivePosition()
     auto now = juce::Time::getMillisecondCounterHiRes();
     if (now - livePolledAt < 33.0)
         return;
+    auto resumed = now - livePolledAt > 250.0;
     livePolledAt = now;
 
     auto &state = guiEditor->synth->lfoDisplayState;
-    auto selection = SurgeSynthesizer::LFODisplayState::selection(scene, lfoid, modIndex);
+    auto selection =
+        SurgeSynthesizer::LFODisplayState::selection(scene, lfoid, modIndex, lfodata->shape.val.i);
+    if (selection != liveSelection)
+    {
+        liveSelection = selection;
+        liveSnapshot = 0;
+        liveValid = false;
+        liveHistory.clear();
+        forceRepaint = true;
+        repaint();
+    }
     auto generation = state.generation.load(std::memory_order_relaxed);
     auto sample = state.snapshot.load(std::memory_order_relaxed);
+    if (resumed)
+    {
+        // Discard the pending response from before the editor was hidden or stalled.
+        liveSnapshot = 0;
+        liveHistory.clear();
+    }
     auto previousSnapshot = liveSnapshot;
     auto previousValid = liveValid;
-    if (generation != liveGeneration && int(sample >> 48) == selection)
+    auto received = !resumed && generation != liveGeneration && int(sample >> 48) == selection;
+    if (received)
     {
         liveSnapshot = sample;
         liveReceivedAt = now;
@@ -476,36 +500,22 @@ void LFOAndStepDisplay::updateLivePosition()
     liveGeneration = generation;
     liveValid = int(liveSnapshot >> 48) == selection && now - liveReceivedAt < 250.0 &&
                 std::isfinite(SurgeSynthesizer::LFODisplayState::value(liveSnapshot));
+    if (usesLiveHistory())
+    {
+        if (!liveValid)
+            liveHistory.clear();
+        else if (received)
+            liveHistory.push(now, SurgeSynthesizer::LFODisplayState::value(liveSnapshot));
+    }
     state.request.store(selection, std::memory_order_relaxed);
     // The waveform is cached. Only the marker and value change on these repaints.
-    if (previousSnapshot != liveSnapshot || previousValid != liveValid)
-        repaint(waveform_display);
+    if (previousSnapshot != liveSnapshot || previousValid != liveValid ||
+        (received && usesLiveHistory()))
+        repaint(isStepSequencer() ? main_panel : waveform_display);
 }
 
 void LFOAndStepDisplay::paintLiveReference(juce::Graphics &g)
 {
-    // Render exactly one cycle with a constant envelope. This is a reference curve;
-    // the marker includes the live envelope and parameter modulation.
-    LFOStorage reference = *lfodata;
-    pdata data[n_scene_params]{};
-    for (auto *p = &lfodata->rate; p <= &lfodata->release; ++p)
-        data[p->param_id_in_scene] = p->val;
-
-    constexpr int samples = 512;
-    reference.rate.deactivated = false;
-    reference.rate.temposync = true; // exact phase increment, independent of the rate lookup table
-    reference.delay.deactivated = true;
-    reference.trigmode.val.i = lm_keytrigger;
-    data[reference.rate.param_id_in_scene].f =
-        std::log2(storage->samplerate / (BLOCK_SIZE * samples * storage->temposyncratio));
-    auto phaseOffset = reference.shape.val.i == lt_tri && !reference.unipolar.val.b   ? 0.75f
-                       : reference.shape.val.i == lt_sine && reference.unipolar.val.b ? 0.25f
-                                                                                      : 0.f;
-    data[reference.start_phase.param_id_in_scene].f = phaseOffset;
-    LFOModulationSource lfo;
-    lfo.assign(storage, &reference, data, nullptr, ss, ms, fs, true);
-    lfo.attack();
-
     auto bounds = waveform_display.toFloat().withTrimmedTop(12).withTrimmedBottom(12);
     g.setColour(skin->getColor(Colors::LFO::Waveform::Background));
     g.fillRect(waveform_display);
@@ -514,21 +524,69 @@ void LFOAndStepDisplay::paintLiveReference(juce::Graphics &g)
         g.drawHorizontalLine(bounds.getY() + bounds.getHeight() * y, bounds.getX(),
                              bounds.getRight());
 
+    constexpr int samples = 512;
     juce::Path curve;
-    float priorPhase = -1.f;
-    for (int i = 0; i < samples; ++i)
+    if (isMSEG() && ms && ms->totalDuration > 0)
     {
-        lfo.process_block();
-        auto phase = lfo.getPhase();
-        auto x = bounds.getX() + phase * bounds.getWidth();
-        auto y = bounds.getY() + (0.5f - 0.4f * lfo.get_output(modIndex)) * bounds.getHeight();
-        if (i == 0 || phase < priorPhase)
-            curve.startNewSubPath(x, y);
-        else
-            curve.lineTo(x, y);
-        priorPhase = phase;
+        // One pass over the editable MSEG, before the LFO envelope/amplitude.
+        // Stochastic segments are a reference only; the dot is the actual output.
+        Surge::MSEG::EvaluatorState state;
+        state.seed(2112);
+        for (int i = 0; i < samples; ++i)
+        {
+            auto position = float(i) / samples;
+            double time = position * ms->totalDuration;
+            auto value = Surge::MSEG::valueAt(int(time), time - int(time), lfodata->deform.val.f,
+                                              ms, &state, true);
+            if (modIndex == 2)
+                value = 1.f; // Envelope output, before its live envelope is applied.
+            else if (isUnipolar())
+                value = 0.5f + 0.5f * value;
+            auto x = bounds.getX() + position * bounds.getWidth();
+            auto y = bounds.getY() + (0.5f - 0.4f * value) * bounds.getHeight();
+            if (i == 0)
+                curve.startNewSubPath(x, y);
+            else
+                curve.lineTo(x, y);
+        }
     }
-    lfo.completedModulation();
+    else if (!usesLiveHistory())
+    {
+        LFOStorage reference = *lfodata;
+        pdata data[n_scene_params]{};
+        for (auto *p = &lfodata->rate; p <= &lfodata->release; ++p)
+            data[p->param_id_in_scene] = p->val;
+
+        reference.rate.deactivated = false;
+        reference.rate.temposync =
+            true; // exact phase increment, independent of the rate lookup table
+        reference.delay.deactivated = true;
+        reference.trigmode.val.i = lm_keytrigger;
+        data[reference.rate.param_id_in_scene].f =
+            std::log2(storage->samplerate / (BLOCK_SIZE * samples * storage->temposyncratio));
+        auto phaseOffset = reference.shape.val.i == lt_tri && !reference.unipolar.val.b   ? 0.75f
+                           : reference.shape.val.i == lt_sine && reference.unipolar.val.b ? 0.25f
+                                                                                          : 0.f;
+        data[reference.start_phase.param_id_in_scene].f = phaseOffset;
+        LFOModulationSource lfo;
+        lfo.assign(storage, &reference, data, nullptr, ss, ms, fs, true);
+        lfo.attack();
+
+        float priorPhase = -1.f;
+        for (int i = 0; i < samples; ++i)
+        {
+            lfo.process_block();
+            auto phase = lfo.getPhase();
+            auto x = bounds.getX() + phase * bounds.getWidth();
+            auto y = bounds.getY() + (0.5f - 0.4f * lfo.get_output(modIndex)) * bounds.getHeight();
+            if (i == 0 || phase < priorPhase)
+                curve.startNewSubPath(x, y);
+            else
+                curve.lineTo(x, y);
+            priorPhase = phase;
+        }
+        lfo.completedModulation();
+    }
     g.saveState();
     g.reduceClipRegion(bounds.toNearestInt());
     g.setColour(skin->getColor(Colors::LFO::Waveform::Wave));
@@ -536,30 +594,60 @@ void LFOAndStepDisplay::paintLiveReference(juce::Graphics &g)
     g.restoreState();
     g.setColour(skin->getColor(Colors::LFO::Waveform::Ruler::Text).withAlpha(1.f));
     g.setFont(skin->fontManager->lfoTypeFont);
-    g.drawText("0%", waveform_display.withHeight(12).withY(waveform_display.getBottom() - 12),
-               juce::Justification::left);
-    g.drawText("Cycle phase",
-               waveform_display.withHeight(12).withY(waveform_display.getBottom() - 12),
-               juce::Justification::centred);
-    g.drawText("100%", waveform_display.withHeight(12).withY(waveform_display.getBottom() - 12),
-               juce::Justification::right);
+    auto ruler = waveform_display.withHeight(12).withY(waveform_display.getBottom() - 12);
+    g.drawText(usesLiveHistory() ? "-8 s" : "0%", ruler, juce::Justification::left);
+    g.drawText(usesLiveHistory() ? "Recent output"
+               : isMSEG()        ? "MSEG position"
+                                 : "Cycle phase",
+               ruler, juce::Justification::centred);
+    g.drawText(usesLiveHistory() ? "Now" : "100%", ruler, juce::Justification::right);
 }
 
 void LFOAndStepDisplay::paintLivePosition(juce::Graphics &g)
 {
     auto bounds = waveform_display.toFloat().withTrimmedTop(12).withTrimmedBottom(12);
     g.saveState();
-    g.reduceClipRegion(waveform_display);
+    g.reduceClipRegion(isStepSequencer() ? main_panel : waveform_display);
     if (liveValid)
     {
         auto phase = SurgeSynthesizer::LFODisplayState::phase(liveSnapshot);
         auto value = SurgeSynthesizer::LFODisplayState::value(liveSnapshot);
+        if (isStepSequencer())
+        {
+            bounds = rect_steps;
+            // Compensate for the packed position's downward quantization at exact boundaries.
+            auto step = std::clamp(int(phase * n_stepseqsteps + n_stepseqsteps / 65535.f), 0,
+                                   n_stepseqsteps - 1);
+            g.setColour(juce::Colours::white.withAlpha(0.6f));
+            g.drawRect(steprect[step].reduced(1), 1.f);
+            // Match the sequencer's bipolar/unipolar vertical scale.
+            value = isUnipolar() ? 2.f * value - 1.f : value;
+        }
+        else if (usesLiveHistory())
+        {
+            g.setColour(skin->getColor(Colors::LFO::Waveform::Wave));
+            g.strokePath(liveHistory.path(bounds, lfodata->shape.val.i == lt_snh),
+                         juce::PathStrokeType(1.f));
+            phase = 1.f;
+        }
         auto x = bounds.getX() + phase * bounds.getWidth();
-        auto y = bounds.getY() + (0.5f - 0.4f * std::clamp(value, -1.f, 1.f)) * bounds.getHeight();
+        auto y = bounds.getY() +
+                 (0.5f - (isStepSequencer() ? 0.5f : 0.4f) * std::clamp(value, -1.f, 1.f)) *
+                     bounds.getHeight();
+        if (isStepSequencer() || isMSEG())
+        {
+            g.setColour(juce::Colours::white.withAlpha(0.35f));
+            g.drawVerticalLine(int(x), bounds.getY(), bounds.getBottom());
+        }
         g.setColour(juce::Colours::black.withAlpha(0.8f));
         g.fillEllipse(x - 4.f, y - 4.f, 8.f, 8.f);
         g.setColour(juce::Colours::white);
         g.fillEllipse(x - 2.5f, y - 2.5f, 5.f, 5.f);
+    }
+    if (isStepSequencer())
+    {
+        g.restoreState();
+        return; // Keep the step/trigger editing area unobscured by a text label.
     }
     g.setColour(skin->getColor(Colors::LFO::Waveform::Ruler::Text).withAlpha(1.f));
     g.setFont(skin->fontManager->lfoTypeFont);
@@ -567,6 +655,14 @@ void LFOAndStepDisplay::paintLivePosition(juce::Graphics &g)
     auto text = liveValid ? fmt::format("{}  {:+.3f}", label,
                                         SurgeSynthesizer::LFODisplayState::value(liveSnapshot))
                           : std::string(label) + " (inactive)";
+    if (liveValid && lfodata->shape.val.i == lt_envelope)
+    {
+        static const char *stages[] = {"off",   "delay",   "attack",  "hold",
+                                       "decay", "release", "release", "sustain / finished"};
+        auto stage =
+            std::clamp(int(SurgeSynthesizer::LFODisplayState::phase(liveSnapshot) * 8), 0, 7);
+        text += std::string("  ") + stages[stage];
+    }
     g.drawText(text, waveform_display.withHeight(12), juce::Justification::left);
     g.restoreState();
 }
@@ -579,10 +675,20 @@ void LFOAndStepDisplay::paint(juce::Graphics &g)
     if (liveMode != lastLiveMode)
         forceRepaint = true;
     lastLiveMode = liveMode;
+    if (liveMode && isStepSequencer())
+    {
+        paintStepSeq(g);
+        paintLivePosition(g);
+        if (g.clipRegionIntersects(left_panel))
+            paintTypeSelector(g);
+        return;
+    }
     if (liveMode)
     {
         if (paramsHasChanged())
         {
+            if (usesLiveHistory())
+                liveHistory.clear();
             backingImage->clear(backingImage->getBounds());
             juce::Graphics gr(*backingImage);
             gr.addTransform(juce::AffineTransform().scale(zoomFactor / 100.f * 2.f));
@@ -1461,182 +1567,187 @@ void LFOAndStepDisplay::paintStepSeq(juce::Graphics &g)
     // code above but with very different scaling in time since we need to match the steps no
     // matter the rate
 
-    pdata tp[n_scene_params];
-    tp[lfodata->delay.param_id_in_scene].i = lfodata->delay.val.i;
-    tp[lfodata->attack.param_id_in_scene].i = lfodata->attack.val.i;
-    tp[lfodata->hold.param_id_in_scene].i = lfodata->hold.val.i;
-    tp[lfodata->decay.param_id_in_scene].i = lfodata->decay.val.i;
-    tp[lfodata->sustain.param_id_in_scene].i = lfodata->sustain.val.i;
-    tp[lfodata->release.param_id_in_scene].i = lfodata->release.val.i;
-
-    tp[lfodata->magnitude.param_id_in_scene].i = lfodata->magnitude.val.i;
-
-    // Min out the rate. Be careful with temposync.
-    float floorrate = -1.2; // can't be const - we mod it
-    float displayRate = lfodata->rate.val.f;
-    const float twotofloor = powf(2.0, -1.2); // so copy value here
-
-    if (lfodata->rate.temposync)
+    // The live marker follows the actual engine. Retain the simulated preview only
+    // when live display is disabled, so a tick never reruns thousands of LFO blocks.
+    if (!showLivePosition)
     {
-        /*
-         * So frequency = temposyncration * 2^rate
-         * We want floor of frequency to be 2^-3.5 (that's the check below)
-         * So 2^rate = temposyncratioinb 2^-3.5;
-         * rate = log2( 2^-3.5 * tsratioinb )
-         */
-        floorrate = std::max(floorrate, log2(twotofloor * storage->temposyncratio_inv));
-    }
+        pdata tp[n_scene_params];
+        tp[lfodata->delay.param_id_in_scene].i = lfodata->delay.val.i;
+        tp[lfodata->attack.param_id_in_scene].i = lfodata->attack.val.i;
+        tp[lfodata->hold.param_id_in_scene].i = lfodata->hold.val.i;
+        tp[lfodata->decay.param_id_in_scene].i = lfodata->decay.val.i;
+        tp[lfodata->sustain.param_id_in_scene].i = lfodata->sustain.val.i;
+        tp[lfodata->release.param_id_in_scene].i = lfodata->release.val.i;
 
-    if (lfodata->rate.val.f < floorrate)
-    {
-        tp[lfodata->rate.param_id_in_scene].f = floorrate;
-        displayRate = floorrate;
-    }
-    else
-    {
-        tp[lfodata->rate.param_id_in_scene].i = lfodata->rate.val.i;
-    }
+        tp[lfodata->magnitude.param_id_in_scene].i = lfodata->magnitude.val.i;
 
-    tp[lfodata->shape.param_id_in_scene].i = lfodata->shape.val.i;
-    tp[lfodata->start_phase.param_id_in_scene].i = lfodata->start_phase.val.i;
-    tp[lfodata->deform.param_id_in_scene].i = lfodata->deform.val.i;
-    tp[lfodata->trigmode.param_id_in_scene].i = lm_keytrigger;
+        // Min out the rate. Be careful with temposync.
+        float floorrate = -1.2; // can't be const - we mod it
+        float displayRate = lfodata->rate.val.f;
+        const float twotofloor = powf(2.0, -1.2); // so copy value here
 
-    /*
-    ** First big difference - the total env time is basically 16 * the time of the rate
-    */
-    float freq = pow(2.0, displayRate); // frequency in hz
-    if (lfodata->rate.temposync)
-    {
-        freq *= storage->temposyncratio;
-    }
-
-    float cyclesec = 1.0 / freq;
-    float totalSampleTime = cyclesec * n_stepseqsteps;
-    float susTime = 4.0 * cyclesec;
-
-    LFOModulationSource *tlfo = new LFOModulationSource();
-    tlfo->assign(storage, lfodata, tp, 0, ss, ms, fs, true);
-    populateLFOMS(tlfo);
-    tlfo->attack();
-    auto boxo = rect_steps;
-
-    int minSamples = (1 << 4) * boxo.getWidth();
-    int totalSamples =
-        std::max((int)minSamples, (int)(totalSampleTime * storage->samplerate / BLOCK_SIZE));
-    float cycleSamples = cyclesec * storage->samplerate / BLOCK_SIZE;
-
-    // OK so lets assume we want about 1000 pixels worth tops in
-    int averagingWindow = (int)(totalSamples / 2000.0) + 1;
-
-    float valScale = 100.0;
-    int susCountdown = -1;
-
-    juce::Path path, eupath, edpath;
-
-    for (int i = 0; i < totalSamples; i += averagingWindow)
-    {
-        float val = 0;
-        float eval = 0;
-        float minval = 1000000;
-        float maxval = -1000000;
-        float firstval;
-        float lastval;
-
-        for (int s = 0; s < averagingWindow; s++)
+        if (lfodata->rate.temposync)
         {
-            tlfo->process_block();
-
-            if (susCountdown < 0 && tlfo->env_state == lfoeg_stuck)
-            {
-                susCountdown = susTime * storage->samplerate / BLOCK_SIZE;
-            }
-            else if (susCountdown == 0 && tlfo->env_state == lfoeg_stuck)
-            {
-                tlfo->release();
-            }
-            else if (susCountdown > 0)
-            {
-                susCountdown--;
-            }
-
-            val += tlfo->get_output(0);
-
-            if (s == 0)
-            {
-                firstval = tlfo->get_output(0);
-            }
-
-            if (s == averagingWindow - 1)
-            {
-                lastval = tlfo->get_output(0);
-            }
-
-            minval = std::min(tlfo->get_output(0), minval);
-            maxval = std::max(tlfo->get_output(0), maxval);
-            float evalMag = lfodata->magnitude.get_extended(lfodata->magnitude.val.f);
-            if (lfodata->shape.val.i == lt_formula && !tlfo->formulastate.useAmplitude)
-            {
-                evalMag = 1.f;
-            }
-            eval += tlfo->env_val * evalMag;
+            /*
+             * So frequency = temposyncration * 2^rate
+             * We want floor of frequency to be 2^-3.5 (that's the check below)
+             * So 2^rate = temposyncratioinb 2^-3.5;
+             * rate = log2( 2^-3.5 * tsratioinb )
+             */
+            floorrate = std::max(floorrate, log2(twotofloor * storage->temposyncratio_inv));
         }
 
-        val = val / averagingWindow;
-        eval = eval / averagingWindow;
-
-        if (isUnipolar())
+        if (lfodata->rate.val.f < floorrate)
         {
-            val = val * 2.0 - 1.0;
-        }
-
-        val = ((-val + 1.0f) * 0.5) * valScale;
-
-        float euval = ((-eval + 1.0f) * 0.5) * valScale;
-        float edval = ((eval + 1.0f) * 0.5) * valScale;
-        float xc = valScale * i / (cycleSamples * n_stepseqsteps);
-
-        if (i == 0)
-        {
-            path.startNewSubPath(xc, val);
-            eupath.startNewSubPath(xc, euval);
-
-            if (!isUnipolar())
-            {
-                edpath.startNewSubPath(xc, edval);
-            }
+            tp[lfodata->rate.param_id_in_scene].f = floorrate;
+            displayRate = floorrate;
         }
         else
         {
-            path.lineTo(xc, val);
-            eupath.lineTo(xc, euval);
+            tp[lfodata->rate.param_id_in_scene].i = lfodata->rate.val.i;
+        }
 
-            if (!isUnipolar())
+        tp[lfodata->shape.param_id_in_scene].i = lfodata->shape.val.i;
+        tp[lfodata->start_phase.param_id_in_scene].i = lfodata->start_phase.val.i;
+        tp[lfodata->deform.param_id_in_scene].i = lfodata->deform.val.i;
+        tp[lfodata->trigmode.param_id_in_scene].i = lm_keytrigger;
+
+        /*
+        ** First big difference - the total env time is basically 16 * the time of the rate
+        */
+        float freq = pow(2.0, displayRate); // frequency in hz
+        if (lfodata->rate.temposync)
+        {
+            freq *= storage->temposyncratio;
+        }
+
+        float cyclesec = 1.0 / freq;
+        float totalSampleTime = cyclesec * n_stepseqsteps;
+        float susTime = 4.0 * cyclesec;
+
+        LFOModulationSource *tlfo = new LFOModulationSource();
+        tlfo->assign(storage, lfodata, tp, 0, ss, ms, fs, true);
+        populateLFOMS(tlfo);
+        tlfo->attack();
+        auto boxo = rect_steps;
+
+        int minSamples = (1 << 4) * boxo.getWidth();
+        int totalSamples =
+            std::max((int)minSamples, (int)(totalSampleTime * storage->samplerate / BLOCK_SIZE));
+        float cycleSamples = cyclesec * storage->samplerate / BLOCK_SIZE;
+
+        // OK so lets assume we want about 1000 pixels worth tops in
+        int averagingWindow = (int)(totalSamples / 2000.0) + 1;
+
+        float valScale = 100.0;
+        int susCountdown = -1;
+
+        juce::Path path, eupath, edpath;
+
+        for (int i = 0; i < totalSamples; i += averagingWindow)
+        {
+            float val = 0;
+            float eval = 0;
+            float minval = 1000000;
+            float maxval = -1000000;
+            float firstval;
+            float lastval;
+
+            for (int s = 0; s < averagingWindow; s++)
             {
-                edpath.lineTo(xc, edval);
+                tlfo->process_block();
+
+                if (susCountdown < 0 && tlfo->env_state == lfoeg_stuck)
+                {
+                    susCountdown = susTime * storage->samplerate / BLOCK_SIZE;
+                }
+                else if (susCountdown == 0 && tlfo->env_state == lfoeg_stuck)
+                {
+                    tlfo->release();
+                }
+                else if (susCountdown > 0)
+                {
+                    susCountdown--;
+                }
+
+                val += tlfo->get_output(0);
+
+                if (s == 0)
+                {
+                    firstval = tlfo->get_output(0);
+                }
+
+                if (s == averagingWindow - 1)
+                {
+                    lastval = tlfo->get_output(0);
+                }
+
+                minval = std::min(tlfo->get_output(0), minval);
+                maxval = std::max(tlfo->get_output(0), maxval);
+                float evalMag = lfodata->magnitude.get_extended(lfodata->magnitude.val.f);
+                if (lfodata->shape.val.i == lt_formula && !tlfo->formulastate.useAmplitude)
+                {
+                    evalMag = 1.f;
+                }
+                eval += tlfo->env_val * evalMag;
+            }
+
+            val = val / averagingWindow;
+            eval = eval / averagingWindow;
+
+            if (isUnipolar())
+            {
+                val = val * 2.0 - 1.0;
+            }
+
+            val = ((-val + 1.0f) * 0.5) * valScale;
+
+            float euval = ((-eval + 1.0f) * 0.5) * valScale;
+            float edval = ((eval + 1.0f) * 0.5) * valScale;
+            float xc = valScale * i / (cycleSamples * n_stepseqsteps);
+
+            if (i == 0)
+            {
+                path.startNewSubPath(xc, val);
+                eupath.startNewSubPath(xc, euval);
+
+                if (!isUnipolar())
+                {
+                    edpath.startNewSubPath(xc, edval);
+                }
+            }
+            else
+            {
+                path.lineTo(xc, val);
+                eupath.lineTo(xc, euval);
+
+                if (!isUnipolar())
+                {
+                    edpath.lineTo(xc, edval);
+                }
             }
         }
+
+        delete tlfo;
+
+        auto q = boxo;
+
+        const auto tfpath = juce::AffineTransform()
+                                .scaled(boxo.getWidth() / valScale, boxo.getHeight() / valScale)
+                                .translated(q.getTopLeft().x, q.getTopLeft().y);
+
+        g.setColour(skin->getColor(Colors::LFO::StepSeq::Envelope));
+
+        g.strokePath(eupath, juce::PathStrokeType(1.0), tfpath);
+
+        if (!isUnipolar())
+        {
+            g.strokePath(edpath, juce::PathStrokeType(1.0), tfpath);
+        }
+
+        g.setColour(skin->getColor(Colors::LFO::StepSeq::Wave));
+        g.strokePath(path, juce::PathStrokeType(1.0), tfpath);
     }
-
-    delete tlfo;
-
-    auto q = boxo;
-
-    const auto tfpath = juce::AffineTransform()
-                            .scaled(boxo.getWidth() / valScale, boxo.getHeight() / valScale)
-                            .translated(q.getTopLeft().x, q.getTopLeft().y);
-
-    g.setColour(skin->getColor(Colors::LFO::StepSeq::Envelope));
-
-    g.strokePath(eupath, juce::PathStrokeType(1.0), tfpath);
-
-    if (!isUnipolar())
-    {
-        g.strokePath(edpath, juce::PathStrokeType(1.0), tfpath);
-    }
-
-    g.setColour(skin->getColor(Colors::LFO::StepSeq::Wave));
-    g.strokePath(path, juce::PathStrokeType(1.0), tfpath);
 
     // draw the RMB drag line
     if (dragMode == ARROW)
@@ -1940,6 +2051,22 @@ void LFOAndStepDisplay::onSkinChanged()
     typeImgHoverOn = typesWithHover[2];
 }
 
+void LFOAndStepDisplay::addLivePositionMenuItem(juce::PopupMenu &menu)
+{
+    auto safeThis = juce::Component::SafePointer<LFOAndStepDisplay>(this);
+    menu.addItem("Show Live LFO Position", true, showLivePosition, [safeThis]() {
+        if (safeThis)
+        {
+            safeThis->showLivePosition = !safeThis->showLivePosition;
+            safeThis->forceRepaint = true;
+            safeThis->liveValid = false;
+            safeThis->liveSnapshot = 0;
+            safeThis->liveHistory.clear();
+            safeThis->repaint();
+        }
+    });
+}
+
 void LFOAndStepDisplay::mouseDown(const juce::MouseEvent &event)
 {
     if (forwardedMainFrameMouseDowns(event))
@@ -1970,19 +2097,11 @@ void LFOAndStepDisplay::mouseDown(const juce::MouseEvent &event)
 
     if (waveform_display.contains(event.position.toInt()) && sge)
     {
-        if (supportsLivePosition() && event.mods.isPopupMenu())
+        if (supportsLivePosition() && !isStepSequencer() && !isMSEG() && !isFormula() &&
+            event.mods.isPopupMenu())
         {
             juce::PopupMenu menu;
-            auto safeThis = juce::Component::SafePointer<LFOAndStepDisplay>(this);
-            menu.addItem("Show Live LFO Position", true, showLivePosition, [safeThis]() {
-                if (safeThis)
-                {
-                    safeThis->showLivePosition = !safeThis->showLivePosition;
-                    safeThis->forceRepaint = true;
-                    safeThis->liveValid = false;
-                    safeThis->repaint();
-                }
-            });
+            addLivePositionMenuItem(menu);
             menu.showMenuAsync(guiEditor->popupMenuOptions(this, false)
                                    .withParentComponent(getTopLevelComponent()));
             return;
@@ -2620,6 +2739,8 @@ void LFOAndStepDisplay::showLFODisplayPopupMenu(SurgeGUIEditor::OverlayTags tag)
     contextMenu.addCustomItem(-1, std::move(hmen), nullptr, hment);
 
     contextMenu.addSeparator();
+    addLivePositionMenuItem(contextMenu);
+    contextMenu.addSeparator();
 
     auto sge = firstListenerOfType<SurgeGUIEditor>();
 
@@ -2895,6 +3016,8 @@ void LFOAndStepDisplay::showStepRMB(int i)
 
     contextMenu.addCustomItem(-1, std::move(hmen), nullptr, hment);
 
+    contextMenu.addSeparator();
+    addLivePositionMenuItem(contextMenu);
     contextMenu.addSeparator();
 
     const int precision = Surge::Storage::getValueDisplayPrecision(storage);
