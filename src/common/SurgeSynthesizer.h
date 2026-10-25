@@ -38,6 +38,8 @@ struct QuadFilterChainState;
 #include <cstdio>
 #include <bitset>
 #include <vector>
+#include <cstring>
+#include <limits>
 
 struct timedata
 {
@@ -139,6 +141,39 @@ class alignas(16) SurgeSynthesizer
     int getBlockSize() { return BLOCK_SIZE; }
     int getMpeMainChannel(int voiceChannel, int key);
     void process();
+
+    // A single selected LFO is sampled on demand, at the editor's refresh rate.
+    // The packed atomic keeps the selection, phase and output in one coherent snapshot.
+    struct LFODisplayState
+    {
+        static_assert(std::atomic<uint64_t>::is_always_lock_free);
+        std::atomic<int> request{0};
+        std::atomic<uint64_t> snapshot{0};
+        std::atomic<unsigned int> generation{0};
+
+        static int selection(int scene, int lfo, int output)
+        {
+            return 1 + (scene * n_lfos + lfo) * max_lfo_indices + output;
+        }
+        void publish(int selection, float phase, float value)
+        {
+            uint32_t bits;
+            std::memcpy(&bits, &value, sizeof(bits));
+            auto p = static_cast<uint64_t>(std::clamp(phase, 0.f, 1.f) * 65535.f);
+            snapshot.store((uint64_t(selection) << 48) | (p << 32) | bits,
+                           std::memory_order_relaxed);
+            generation.fetch_add(1, std::memory_order_relaxed);
+        }
+        static float value(uint64_t sample)
+        {
+            auto bits = static_cast<uint32_t>(sample);
+            float result;
+            std::memcpy(&result, &bits, sizeof(result));
+            return result;
+        }
+        static float phase(uint64_t sample) { return ((sample >> 32) & 0xffff) / 65535.f; }
+    } lfoDisplayState;
+    void publishLFODisplayState();
 
     PluginLayer *getParent();
 

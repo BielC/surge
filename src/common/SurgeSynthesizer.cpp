@@ -4704,6 +4704,51 @@ void SurgeSynthesizer::enqueueFXOff(int whichFX)
     load_fx_needed = true;
 }
 
+void SurgeSynthesizer::publishLFODisplayState()
+{
+    if (lfoDisplayState.request.load(std::memory_order_relaxed) == 0)
+        return;
+    auto requested = lfoDisplayState.request.exchange(0, std::memory_order_relaxed);
+    if (requested <= 0 || requested > n_scenes * n_lfos * max_lfo_indices)
+        return;
+
+    auto index = requested - 1;
+    auto output = index % max_lfo_indices;
+    auto lfo = (index / max_lfo_indices) % n_lfos;
+    auto scene = index / (max_lfo_indices * n_lfos);
+    LFOModulationSource *source{nullptr};
+    auto &sc = storage.getPatch().scene[scene];
+    if (lfo < n_lfos_voice)
+    {
+        // Unused voice LFOs (apart from LFO1) are intentionally not processed.
+        if (lfo == 0 || sc.modsource_doprocess[ms_lfo1 + lfo])
+        {
+            SurgeVoice *newest{nullptr};
+            for (auto *voice : voices[scene])
+            {
+                if (!newest || (voice->state.gate && !newest->state.gate) ||
+                    (voice->state.gate == newest->state.gate && voice->age <= newest->age))
+                    newest = voice;
+            }
+            if (newest)
+                source = static_cast<LFOModulationSource *>(newest->modsources[ms_lfo1 + lfo]);
+        }
+    }
+    else
+    {
+        auto mode = storage.getPatch().scenemode.val.i;
+        if (mode != sm_single || storage.getPatch().scene_active.val.i == scene)
+            source =
+                static_cast<LFOModulationSource *>(sc.modsources[ms_slfo1 + lfo - n_lfos_voice]);
+    }
+
+    if (source && source->everAttacked && output < source->get_active_outputs() &&
+        std::isfinite(source->getPhase()))
+        lfoDisplayState.publish(requested, source->getPhase(), source->get_output(output));
+    else
+        lfoDisplayState.publish(requested, 0.f, std::numeric_limits<float>::quiet_NaN());
+}
+
 void SurgeSynthesizer::processControl()
 {
     processEnqueuedPatchIfNeeded();
@@ -5196,6 +5241,7 @@ void SurgeSynthesizer::process()
         }
     }
 
+    publishLFODisplayState();
     storage.modRoutingMutex.unlock();
     storage.activeVoiceCount = vcount;
 

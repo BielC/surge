@@ -1645,3 +1645,102 @@ TEST_CASE("Scene LFO Retrigger On New Note", "[mod]")
                 lrm_first_note_only);
     }
 }
+
+TEST_CASE("Live LFO display samples the engine without changing audio", "[mod][lfo-display]")
+{
+    using Display = SurgeSynthesizer::LFODisplayState;
+    auto surge = surgeOnSine();
+    auto &state = surge->lfoDisplayState;
+    auto sample = [&](int scene, int lfo, int output = 0) {
+        auto selected = Display::selection(scene, lfo, output);
+        state.request.store(selected);
+        surge->process();
+        auto result = state.snapshot.load();
+        REQUIRE(int(result >> 48) == selected);
+        REQUIRE(state.request.load() == 0);
+        return result;
+    };
+    auto matches = [](uint64_t sample, LFOModulationSource *source, int output) {
+        REQUIRE(Display::value(sample) == source->get_output(output));
+        REQUIRE(Display::phase(sample) == Approx(source->getPhase()).margin(1.f / 65535.f));
+    };
+
+    SECTION("No voice produces an inactive snapshot")
+    {
+        REQUIRE(std::isnan(Display::value(sample(0, 0))));
+    }
+    SECTION("Voice LFO follows the newest held note and the selected output")
+    {
+        surge->playNote(0, 60, 100, 0);
+        sample(0, 0);
+        surge->playNote(0, 64, 100, 0);
+        for (int output = 0; output < 3; ++output)
+        {
+            auto result = sample(0, 0, output);
+            auto newest = surge->voices[0].back();
+            REQUIRE(newest->state.key == 64);
+            matches(result, static_cast<LFOModulationSource *>(newest->modsources[ms_lfo1]),
+                    output);
+        }
+        surge->allSoundOff();
+        for (int i = 0; i < 200; ++i)
+            surge->process();
+        REQUIRE(std::isnan(Display::value(sample(0, 0))));
+    }
+    SECTION("Unprocessed voice LFO stays inactive")
+    {
+        surge->playNote(0, 60, 100, 0);
+        REQUIRE(std::isnan(Display::value(sample(0, 1))));
+    }
+    SECTION("Scene selection is respected")
+    {
+        surge->storage.getPatch().scenemode.val.i = sm_dual;
+        surge->playNote(0, 60, 100, 0);
+        for (int scene = 0; scene < n_scenes; ++scene)
+        {
+            auto result = sample(scene, n_lfos_voice);
+            auto source = static_cast<LFOModulationSource *>(
+                surge->storage.getPatch().scene[scene].modsources[ms_slfo1]);
+            matches(result, source, 0);
+        }
+    }
+    SECTION("Polling never advances the LFO or changes audio")
+    {
+        surge->playNote(0, 60, 100, 0);
+        surge->process();
+        auto voice = surge->voices[0].front();
+        auto source = static_cast<LFOModulationSource *>(voice->modsources[ms_lfo1]);
+        auto phase = source->getPhase();
+        auto value = source->get_output(0);
+        float before[2][BLOCK_SIZE];
+        std::memcpy(before, surge->output, sizeof(before));
+        for (int i = 0; i < 1000; ++i)
+        {
+            state.request.store(Display::selection(0, 0, 0));
+            surge->publishLFODisplayState();
+        }
+        REQUIRE(source->getPhase() == phase);
+        REQUIRE(source->get_output(0) == value);
+        REQUIRE(std::memcmp(before, surge->output, sizeof(before)) == 0);
+    }
+}
+
+// Run explicitly with surge-testrunner "[lfo-display-perf]".
+TEST_CASE("Live LFO snapshot cost", "[.][lfo-display-perf]")
+{
+    auto surge = surgeOnSine();
+    for (int note = 48; note < 64; ++note)
+        surge->playNote(0, note, 100, 0);
+    surge->process();
+    BENCHMARK("No editor request")
+    {
+        surge->publishLFODisplayState();
+        return surge->lfoDisplayState.generation.load();
+    };
+    BENCHMARK("Selected voice LFO, 16 voices")
+    {
+        surge->lfoDisplayState.request.store(SurgeSynthesizer::LFODisplayState::selection(0, 0, 0));
+        surge->publishLFODisplayState();
+        return surge->lfoDisplayState.snapshot.load();
+    };
+}

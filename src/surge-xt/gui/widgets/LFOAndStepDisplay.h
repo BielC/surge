@@ -44,6 +44,17 @@ struct LFOAndStepDisplay : public juce::Component,
     LFOAndStepDisplay(SurgeGUIEditor *e);
     void paint(juce::Graphics &g) override;
     void paintWaveform(juce::Graphics &g);
+    bool supportsLivePosition() const;
+    void updateLivePosition();
+    void paintLiveReference(juce::Graphics &g);
+    void paintLivePosition(juce::Graphics &g);
+    bool showLivePosition{true};
+    uint64_t liveSnapshot{0};
+    unsigned int liveGeneration{0};
+    double liveReceivedAt{0};
+    double livePolledAt{0};
+    bool liveValid{false};
+    bool lastLiveMode{false};
     void paintStepSeq(juce::Graphics &g);
     void paintTypeSelector(juce::Graphics &g);
     void resized() override;
@@ -155,7 +166,15 @@ struct LFOAndStepDisplay : public juce::Component,
     modsources modsource;
     void setModSource(modsources m) { modsource = m; }
     int modIndex{0};
-    void setModIndex(int m) { modIndex = m; }
+    void setModIndex(int m)
+    {
+        if (modIndex != m)
+        {
+            forceRepaint = true;
+            liveValid = false;
+        }
+        modIndex = m;
+    }
 
     StepSequencerStorage *ss{nullptr};
     void setStepSequencerStorage(StepSequencerStorage *s) { ss = s; }

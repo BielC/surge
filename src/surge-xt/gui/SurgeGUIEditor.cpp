@@ -803,6 +803,9 @@ void SurgeGUIEditor::idle()
             }
         }
 
+        if (lfoDisplay)
+            lfoDisplay->updateLivePosition();
+
         if (undoButton && redoButton)
         {
             auto us = dynamic_cast<Surge::Widgets::Switch *>(undoButton);
