@@ -4,6 +4,7 @@ project(surge-xt-tests)
 add_executable(${PROJECT_NAME}
         main.cpp
         XTTestOSC.cpp
+        XTTestSurgeImageCache.cpp
   )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE

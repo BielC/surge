@@ -60,7 +60,7 @@ class SurgeImage
         g.addTransform(scaleAdjustmentTransform());
         auto idr = internalDrawableResolved();
         if (idr)
-            idr->draw(g, opacity, transform);
+            drawableForRendering(g, idr, transform)->draw(g, opacity, transform);
     }
     void drawAt(juce::Graphics &g, float x, float y, float opacity)
     {
@@ -68,7 +68,7 @@ class SurgeImage
         g.addTransform(scaleAdjustmentTransform());
         auto idr = internalDrawableResolved();
         if (idr)
-            idr->drawAt(g, x, y, opacity);
+            drawableForRendering(g, idr, {})->drawAt(g, x, y, opacity);
     }
     void drawWithin(juce::Graphics &g, juce::Rectangle<float> destArea,
                     juce::RectanglePlacement placement, float opacity)
@@ -77,7 +77,10 @@ class SurgeImage
         g.addTransform(scaleAdjustmentTransform());
         auto idr = internalDrawableResolved();
         if (idr)
-            idr->drawWithin(g, destArea, placement, opacity);
+        {
+            auto transform = placement.getTransformToFit(idr->getDrawableBounds(), destArea);
+            drawableForRendering(g, idr, transform)->draw(g, opacity, transform);
+        }
     }
 
     std::unique_ptr<juce::Drawable> createCopy()
@@ -92,12 +95,24 @@ class SurgeImage
      * I provide direct access to the drawable but be careful. Things like
      * changing zoom or skins can invalidate the pointer returned from here.
      */
-    juce::Drawable *getDrawableButUseWithCaution() { return internalDrawableResolved(); }
+    juce::Drawable *getDrawableButUseWithCaution()
+    {
+        // A caller can retain and mutate this pointer, so keep this image live as a vector.
+        allowRenderCache = false;
+        renderCache.reset();
+        return internalDrawableResolved();
+    }
 
     juce::Image asJuceImage(float scaleBy = 1.0);
 
   private:
     juce::Drawable *internalDrawableResolved();
+    juce::Drawable *drawableForRendering(juce::Graphics &g, juce::Drawable *source,
+                                         const juce::AffineTransform &transform);
+    std::unique_ptr<juce::DrawableImage> renderCache;
+    juce::Drawable *renderCacheSource{nullptr};
+    float renderCacheScale{0.f};
+    bool allowRenderCache{true};
     juce::AffineTransform scaleAdjustmentTransform() const;
 
     static std::atomic<int> instances;
@@ -109,7 +124,7 @@ class SurgeImage
      * map vs unordered is on purpose here - we need this ordered for our zoom search
      */
     std::map<int, std::pair<std::string, std::unique_ptr<SurgeImage>>> pngZooms;
-    int currentPhysicalZoomFactor;
+    int currentPhysicalZoomFactor{100};
 
     std::unique_ptr<juce::Drawable> drawable;
     juce::Drawable *currentDrawable{nullptr};

@@ -88,6 +88,8 @@ SurgeImage *SurgeImage::createFromBinaryWithPrefix(const std::string &prefix, in
 void SurgeImage::setPhysicalZoomFactor(int zoomFactor)
 {
     resolvePNGForZoomLevel(zoomFactor);
+    if (currentPhysicalZoomFactor != zoomFactor)
+        renderCache.reset();
     currentPhysicalZoomFactor = zoomFactor;
 
     if (pngZooms.size() > 0)
@@ -151,6 +153,45 @@ juce::AffineTransform SurgeImage::scaleAdjustmentTransform() const
     }
 
     return res;
+}
+
+juce::Drawable *SurgeImage::drawableForRendering(juce::Graphics &g, juce::Drawable *source,
+                                                 const juce::AffineTransform &transform)
+{
+    // Share a raster of immutable SVG artwork across controls. Moving live markers can
+    // cause native peers to redraw neighbouring controls and large parts of the skin.
+    // PNGs are already rasters; externally mutable drawables keep their original path.
+    if (!allowRenderCache)
+        return source;
+    auto scale = g.getInternalContext().getPhysicalPixelScaleFactor() * transform.getScaleFactor();
+    // Avoid walking the SVG tree for bounds or doing RTTI on each frame. The source
+    // is immutable here; handing out a mutable pointer disables caching above.
+    if (renderCache && renderCacheSource == source && renderCacheScale == scale)
+        return renderCache.get();
+    if (dynamic_cast<juce::DrawableImage *>(source) || !source->getTransform().isIdentity())
+        return source;
+    auto bounds = source->getDrawableBounds().getSmallestIntegerContainer().expanded(1).toFloat();
+    auto width = std::ceil(bounds.getWidth() * scale);
+    auto height = std::ceil(bounds.getHeight() * scale);
+    // Bound each allocation, including large SVG sprite sheets and extreme zooms.
+    constexpr double maxPixels = 4 * 1024 * 1024;
+    if (!std::isfinite(scale) || scale <= 0.f || width < 1 || height < 1 ||
+        width * height > maxPixels)
+        return source;
+
+    {
+        juce::Image image(juce::Image::ARGB, int(width), int(height), true);
+        juce::Graphics imageGraphics(image);
+        source->draw(
+            imageGraphics, 1.f,
+            juce::AffineTransform::translation(-bounds.getX(), -bounds.getY()).scaled(scale));
+        renderCache = std::make_unique<juce::DrawableImage>(image);
+        // Match the padded raster's logical dimensions without stretching its edge pixels.
+        renderCache->setBoundingBox(bounds.withSize(width / scale, height / scale));
+        renderCacheSource = source;
+        renderCacheScale = scale;
+    }
+    return renderCache.get();
 }
 
 juce::Image SurgeImage::asJuceImage(float scaleBy)

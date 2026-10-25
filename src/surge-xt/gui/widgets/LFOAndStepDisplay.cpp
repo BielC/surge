@@ -591,7 +591,8 @@ void LFOAndStepDisplay::paint(juce::Graphics &g)
         g.drawImage(*backingImage, getLocalBounds().toFloat(),
                     juce::RectanglePlacement::fillDestination);
         paintLivePosition(g);
-        paintTypeSelector(g);
+        if (g.clipRegionIntersects(left_panel))
+            paintTypeSelector(g);
         return;
     }
 

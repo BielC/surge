@@ -35,9 +35,9 @@ identity, cutoff envelope/key tracking, offset scale, and non-mutating polling.
 A local 30-sample microbenchmark measured approximately 2 ns without a request and
 113 ns per requested refresh for eight modulated parameters with 16 voices.
 These figures exclude GUI rendering and do not establish total DAW CPU impact.
-Standalone and VST3 builds pass. The new parameter markers still need a visual
-check: the standalone restart paused opening its user-preferences file, before
-creating its window. This startup issue was observed outside the new display code.
+Standalone and VST3 builds pass. Visual checks confirmed moving parameter
+markers in the Classic and Purple skins, a changed cutoff base handle, and
+modulation-edit colours. The standalone preferences-access issue was resolved.
 
 ```sh
 build/src/surge-testrunner/surge-testrunner '[parameter-display]'
@@ -80,21 +80,29 @@ broader realtime waveform request in
 ## Checks
 
 Built the ARM64 Release standalone and VST3 on macOS, with plugin copying disabled.
-The standalone is copied to `~/Applications/Surge XT LFO Prototype.app` and
-ad-hoc signed; its signature verifies. The VST3 has not been installed or tested
-in a DAW. Existing installed plugins are untouched.
-The modulation suite passed all 16 test cases, including snapshot selection,
-engine value/phase agreement, inactive sources and non-mutating polling.
-The GUI was checked with a slow 0.125 Hz sine LFO, including the Purple skin.
-Automated native UI checks could not confirm the right-click toggle, so that
-interaction still needs a manual check. Pre-commit could not run because
-upstream has no `.pre-commit-config.yaml`; changed C++ lines were clang-formatted
-and `git diff --check` passed.
+The optimized standalone is copied to
+`~/Applications/Surge XT LFO Optimized.app` with its own bundle identifier and a
+verified ad-hoc signature. It opens alongside the previous prototype, preserving
+that app's unsaved patch. The VST3 has not been installed or tested in a DAW.
+
+The modulation suite passed all 17 test cases. The parameter and LFO display
+checks passed 101 assertions, and the new artwork-cache tests passed 21 assertions.
+The GUI was checked with a slow 0.125 Hz LFO, including moving LFO/parameter dots,
+sine-to-triangle selection, cutoff changes and modulation editing. The optimized
+standalone also opens with the Purple skin. Native automation could not confirm
+the context-menu toggle or interactive zoom, so those remain manual checks.
+Pre-commit could not run because upstream has no `.pre-commit-config.yaml`;
+C++ formatting and `git diff --check` passed.
 
 A local Catch2 microbenchmark (30 samples) measured about 3.3 ns for the
-no-request path and 26 ns for a selected voice LFO with 16 voices. These figures
-measure snapshot sampling only, not total GUI rendering or DAW CPU usage.
-A controlled live-display-on/off CPU comparison remains to be done.
+no-request path and 26 ns for a selected voice LFO with 16 voices. Those figures
+measure snapshot sampling only. The native editor comparison found much larger
+rendering costs, and a shared immutable-artwork raster cache now reduces repeated
+SVG painting without changing the audio engine or the display refresh rate.
+The measured process CPU fell by about 25% for one voice and 22% for 16 voices
+relative to the previous prototype. The 64-voice case did not improve, and peak
+process memory rose. See [the performance notes](Live%20modulation%20performance.md)
+for the comparison and its limits.
 
 ```sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_LTO=OFF -DSURGE_COPY_AFTER_BUILD=OFF
