@@ -1744,3 +1744,166 @@ TEST_CASE("Live LFO snapshot cost", "[.][lfo-display-perf]")
         return surge->lfoDisplayState.snapshot.load();
     };
 }
+
+TEST_CASE("Live parameter markers use the engine's combined modulation", "[mod][parameter-display]")
+{
+    auto surge = surgeOnSine();
+    auto &patch = surge->storage.getPatch();
+    auto &sc = patch.scene[0];
+    auto &display = surge->parameterDisplayState;
+    auto refresh = [&](int scene = 0) {
+        display.request.store(scene + 1);
+        surge->process();
+        REQUIRE(display.request.load() == 0);
+        return display.generation.load();
+    };
+    auto run = [&](int blocks) {
+        for (int i = 0; i < blocks; ++i)
+            surge->process();
+    };
+
+    SECTION("Scene and voice routings sum, and removed or muted routes disappear")
+    {
+        auto &p = sc.osc[0].pitch;
+        REQUIRE(surge->setModDepth01(p.id, ms_lfo1, 0, 0, 0.15f));
+        REQUIRE(surge->setModDepth01(p.id, ms_slfo1, 0, 0, -0.1f));
+        surge->playNote(0, 60, 100, 0);
+        run(128);
+        auto generation = refresh();
+        auto *voice = surge->newestDisplayVoice(0);
+        REQUIRE(voice);
+        REQUIRE(display.value(p.id, generation) == voice->localcopy[p.param_id_in_scene].f);
+        REQUIRE(display.value(p.id, generation) != p.val.f);
+
+        for (auto &r : sc.modulation_voice)
+            r.muted = true;
+        generation = refresh();
+        REQUIRE(display.value(p.id, generation) == patch.scenedata[0][p.param_id_in_scene].f);
+        sc.modulation_scene.clear();
+        generation = refresh();
+        REQUIRE(std::isnan(display.value(p.id, generation)));
+    }
+    SECTION("Polyphonic parameters follow held notes before releasing notes")
+    {
+        auto &p = sc.osc[0].pitch;
+        REQUIRE(surge->setModDepth01(p.id, ms_velocity, 0, 0, 0.1f));
+        sc.adsr[0].r.val.f = 2.f;
+        surge->playNote(0, 60, 30, 0);
+        run(2);
+        surge->playNote(0, 67, 120, 0);
+        auto generation = refresh();
+        auto *newest = surge->newestDisplayVoice(0);
+        REQUIRE(newest->state.key == 67);
+        REQUIRE(display.value(p.id, generation) == newest->localcopy[p.param_id_in_scene].f);
+        auto louder = display.value(p.id, generation);
+        surge->releaseNote(0, 67, 0);
+        generation = refresh();
+        REQUIRE(surge->newestDisplayVoice(0)->state.key == 60);
+        REQUIRE(display.value(p.id, generation) < louder);
+        surge->releaseNote(0, 60, 0);
+        generation = refresh();
+        REQUIRE(std::isfinite(display.value(p.id, generation))); // releasing voice still sounds
+        surge->allSoundOff();
+        run(200);
+        generation = refresh();
+        REQUIRE(std::isnan(display.value(p.id, generation)));
+    }
+    SECTION("Globals and scene identities are respected")
+    {
+        Surge::Test::setFX(surge, 0, fxt_combulator);
+        auto &p = patch.fx[0].p[2];
+        REQUIRE(surge->setModDepth01(p.id, ms_slfo1, 0, 0, 0.1f));
+        auto &a = sc.osc[0].pitch;
+        auto &b = patch.scene[1].osc[0].pitch;
+        REQUIRE(surge->setModDepth01(a.id, ms_slfo1, 0, 0, 0.1f));
+        REQUIRE(surge->setModDepth01(b.id, ms_slfo1, 1, 0, -0.1f));
+        patch.scenemode.val.i = sm_dual;
+        surge->playNote(0, 60, 100, 0);
+        run(128);
+        auto generation = refresh();
+        REQUIRE(display.value(p.id, generation) == patch.globaldata[p.id].f);
+        REQUIRE(std::isfinite(display.value(a.id, generation)));
+        REQUIRE(std::isnan(display.value(b.id, generation)));
+        generation = refresh(1);
+        REQUIRE(std::isfinite(display.value(b.id, generation)));
+        REQUIRE(std::isnan(display.value(a.id, generation)));
+        patch.scenemode.val.i = sm_single;
+        patch.scene_active.val.i = 0;
+        generation = refresh(1);
+        REQUIRE(std::isnan(display.value(b.id, generation)));
+    }
+    SECTION("Cutoff includes the built-in envelope and key tracking, with the correct offset scale")
+    {
+        auto &a = sc.filterunit[0];
+        auto &b = sc.filterunit[1];
+        a.type.val.i = b.type.val.i = (int)sst::filters::FilterType::fut_lp12;
+        a.cutoff.val.f = 0.f;
+        a.keytrack.val.f = 0.5f;
+        a.envmod.val.f = 24.f;
+        b.cutoff.val.f = 7.f;
+        b.keytrack.val.f = 0.f;
+        b.envmod.val.f = 0.f;
+        sc.keytrack_root.val.i = 60;
+        sc.adsr[1].a.val.f = -8.f;
+        sc.adsr[1].s.val.f = 0.5f;
+        REQUIRE(surge->setModDepth01(b.cutoff.id, ms_lfo1, 0, 0, 0.05f));
+        surge->playNote(0, 72, 100, 0);
+        run(128);
+        auto generation = refresh();
+        auto *voice = surge->newestDisplayVoice(0);
+        float aeg, feg;
+        voice->getAEGFEGLevel(aeg, feg);
+        REQUIRE(display.value(a.cutoff.id, generation) == Approx(6.f + 24.f * feg));
+        auto cutoffB = voice->localcopy[b.cutoff.param_id_in_scene].f;
+        REQUIRE(display.value(b.cutoff.id, generation) == cutoffB);
+        sc.f2_cutoff_is_offset.val.b = true;
+        generation = refresh();
+        REQUIRE(display.value(b.cutoff.id, generation) ==
+                Approx(voice->localcopy[b.cutoff.param_id_in_scene].f));
+    }
+    SECTION("Polling leaves audio and modulators unchanged, and is idle without a request")
+    {
+        auto &p = sc.osc[0].pitch;
+        REQUIRE(surge->setModDepth01(p.id, ms_lfo1, 0, 0, 0.1f));
+        surge->playNote(0, 60, 100, 0);
+        auto generation = refresh();
+        auto *source = surge->newestDisplayVoice(0)->modsources[ms_lfo1];
+        auto value = source->get_output(0);
+        float before[2][BLOCK_SIZE];
+        std::memcpy(before, surge->output, sizeof(before));
+        for (int i = 0; i < 100; ++i)
+        {
+            display.request.store(1);
+            surge->publishParameterDisplayState();
+        }
+        REQUIRE(source->get_output(0) == value);
+        REQUIRE(std::memcmp(before, surge->output, sizeof(before)) == 0);
+        generation = display.generation.load();
+        surge->publishParameterDisplayState();
+        REQUIRE(display.generation.load() == generation);
+    }
+}
+
+TEST_CASE("Live parameter snapshot cost", "[.][parameter-display-perf]")
+{
+    auto surge = surgeOnSine();
+    for (int note = 48; note < 64; ++note)
+        surge->playNote(0, note, 100, 0);
+    auto &sc = surge->storage.getPatch().scene[0];
+    for (auto *p : {&sc.osc[0].pitch, &sc.osc[1].pitch, &sc.osc[2].pitch, &sc.filterunit[0].cutoff,
+                    &sc.filterunit[0].resonance, &sc.filterunit[1].cutoff,
+                    &sc.filterunit[1].resonance, &sc.pan})
+        surge->setModDepth01(p->id, ms_lfo1, 0, 0, 0.1f);
+    surge->process();
+    BENCHMARK("No parameter display request")
+    {
+        surge->publishParameterDisplayState();
+        return surge->parameterDisplayState.generation.load();
+    };
+    BENCHMARK("Eight modulated parameters, 16 voices")
+    {
+        surge->parameterDisplayState.request.store(1);
+        surge->publishParameterDisplayState();
+        return surge->parameterDisplayState.generation.load();
+    };
+}

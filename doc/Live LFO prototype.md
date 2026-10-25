@@ -1,5 +1,51 @@
 # Live LFO position prototype
 
+## Live parameter markers
+
+Modulated floating-point sliders also show a live dot and a line from their base
+handle to the current modulated value. The main handle stays at the value you set;
+modulation-depth editing remains unchanged. Markers use the skin's positive
+modulation color and refresh at about 30 Hz.
+
+The engine publishes the combined value after scene and voice modulation, using
+the newest held voice (then the newest releasing voice). Global/FX parameters use
+the engine's global modulation data. Muted/removed routings and stale snapshots
+hide their markers. Voice-only modulation needs an active or releasing voice.
+Scene-only modulation can still be shown when there are no voices.
+
+Filter cutoff includes its built-in envelope amount and key tracking, using the
+same calculation as the filter coefficient maker. In filter 2 offset mode the
+marker shows the resulting offset in semitones, matching that slider's scale.
+Linked filter resonance follows filter 1's modulated resonance.
+
+These are parameter targets before DSP smoothing and algorithm-specific limits,
+not per-sample measurements of the eventual audio signal. Values outside the
+slider range pin the marker to the end stop. Discrete controls, other internal
+modulation paths (such as oscillator drift/pitch bend), and per-voice clouds of
+markers are outside this prototype's scope. Fast modulation can alias visually.
+
+The parameter publisher uses one relaxed atomic load per block without a request.
+On a request, it reads existing engine values under the engine's existing routing
+lock, without allocation or adding locks. Packed atomic values carry a refresh
+generation so removed routings and partial refreshes cannot leave old values.
+
+The modulation suite passed 17 test cases, including 54 parameter-display
+assertions covering summed sources, mute/removal, voice priority, scene/global
+identity, cutoff envelope/key tracking, offset scale, and non-mutating polling.
+A local 30-sample microbenchmark measured approximately 2 ns without a request and
+113 ns per requested refresh for eight modulated parameters with 16 voices.
+These figures exclude GUI rendering and do not establish total DAW CPU impact.
+Standalone and VST3 builds pass. The new parameter markers still need a visual
+check: the standalone restart paused opening its user-preferences file, before
+creating its window. This startup issue was observed outside the new display code.
+
+```sh
+build/src/surge-testrunner/surge-testrunner '[parameter-display]'
+build/src/surge-testrunner/surge-testrunner '[parameter-display-perf]' --benchmark-samples 30
+```
+
+## LFO waveform marker
+
 Sine, triangle, square and saw LFOs show a moving dot and a numeric live value.
 The horizontal axis is the oscillator phase. The curve is a cached one-cycle
 reference before the LFO envelope and parameter modulation; the dot includes both.

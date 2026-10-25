@@ -511,6 +511,7 @@ SurgeGUIEditor::SurgeGUIEditor(SurgeSynthEditor *jEd, SurgeSynthesizer *synth)
 
 SurgeGUIEditor::~SurgeGUIEditor()
 {
+    synth->parameterDisplayState.request.store(0, std::memory_order_relaxed);
     closePatchBackup();
 
     juce::PopupMenu::dismissAllActiveMenus();
@@ -525,6 +526,35 @@ SurgeGUIEditor::~SurgeGUIEditor()
 }
 
 void SurgeGUIEditor::forceLFODisplayRebuild() { lfoDisplay->repaint(); }
+
+void SurgeGUIEditor::updateLiveModulatedParameters()
+{
+    if (!frame || !frame->isShowing())
+        return;
+    auto now = juce::Time::getMillisecondCounterHiRes();
+    if (now - parameterDisplayPolledAt < 33.0)
+        return;
+    parameterDisplayPolledAt = now;
+    auto &display = synth->parameterDisplayState;
+    auto generation = display.generation.load(std::memory_order_acquire);
+    if (generation != parameterDisplayGeneration)
+    {
+        parameterDisplayGeneration = generation;
+        parameterDisplayReceivedAt = now;
+    }
+    auto fresh = generation != 0 && now - parameterDisplayReceivedAt < 250.0;
+    auto &patch = synth->storage.getPatch();
+    for (int id = 0; id < n_total_params; ++id)
+    {
+        auto *slider = dynamic_cast<Surge::Widgets::ModulatableSlider *>(param[id]);
+        if (!slider)
+            continue;
+        auto value =
+            fresh ? display.value(id, generation) : std::numeric_limits<float>::quiet_NaN();
+        slider->setLiveModulatedValue(patch.param_ptr[id]->value_to_normalized(value));
+    }
+    display.request.store(current_scene + 1, std::memory_order_relaxed);
+}
 
 void SurgeGUIEditor::idle()
 {
@@ -805,6 +835,7 @@ void SurgeGUIEditor::idle()
 
         if (lfoDisplay)
             lfoDisplay->updateLivePosition();
+        updateLiveModulatedParameters();
 
         if (undoButton && redoButton)
         {
@@ -2481,6 +2512,7 @@ void SurgeGUIEditor::openOrRecreateEditor()
 
 void SurgeGUIEditor::close_editor()
 {
+    synth->parameterDisplayState.request.store(0, std::memory_order_relaxed);
     editor_open = false;
 
     resetComponentTracking();

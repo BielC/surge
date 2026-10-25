@@ -206,6 +206,18 @@ class alignas(16) SurgeVoice
         feg = filterEGSource.get_output(0);
     }
 
+    std::array<float, n_filterunits_per_scene> filterCutoffs() const
+    {
+        auto keytrack = state.pitch - (float)scene->keytrack_root.val.i;
+        auto fenv = modsources[ms_filtereg]->get_output(0);
+        std::array<float, n_filterunits_per_scene> result{
+            localcopy[id_cfa].f + localcopy[id_kta].f * keytrack + localcopy[id_emoda].f * fenv,
+            localcopy[id_cfb].f + localcopy[id_ktb].f * keytrack + localcopy[id_emodb].f * fenv};
+        if (scene->f2_cutoff_is_offset.val.b)
+            result[1] += result[0];
+        return result;
+    }
+
     void restartAEGFEGAttack(float aeg, float feg)
     {
         ampEGSource.attackFrom(aeg);

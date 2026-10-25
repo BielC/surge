@@ -158,6 +158,9 @@ class SurgeGUIEditor : public Surge::GUI::IComponentTagValue::Listener,
     static int start_paramtag_value;
 
     void idle();
+    void updateLiveModulatedParameters();
+    double parameterDisplayPolledAt{0}, parameterDisplayReceivedAt{0};
+    uint32_t parameterDisplayGeneration{0};
     int slowIdleCounter{0};
     int tooltipFrameCounter{0};
     bool queue_refresh;

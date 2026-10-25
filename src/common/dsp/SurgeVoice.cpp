@@ -1457,25 +1457,18 @@ void SurgeVoice::SetQFB(QuadFilterChainState *Q, int e) // Q == 0 means init(ial
         Q->FU[2].active[e] = 0xffffffff;
         Q->FU[3].active[e] = 0xffffffff;
 
-        float keytrack = state.pitch - (float)scene->keytrack_root.val.i;
-        float fenv = modsources[ms_filtereg]->get_output(0);
-        float cutoffA =
-            localcopy[id_cfa].f + localcopy[id_kta].f * keytrack + localcopy[id_emoda].f * fenv;
-        float cutoffB =
-            localcopy[id_cfb].f + localcopy[id_ktb].f * keytrack + localcopy[id_emodb].f * fenv;
+        auto cutoffs = filterCutoffs();
 
-        if (scene->f2_cutoff_is_offset.val.b)
-            cutoffB += cutoffA;
-
-        CM[0].MakeCoeffs(cutoffA, localcopy[id_resoa].f,
+        CM[0].MakeCoeffs(cutoffs[0], localcopy[id_resoa].f,
                          static_cast<FilterType>(scene->filterunit[0].type.val.i),
                          static_cast<FilterSubType>(scene->filterunit[0].subtype.val.i), storage,
                          scene->filterunit[0].cutoff.extend_range);
-        CM[1].MakeCoeffs(
-            cutoffB, scene->f2_link_resonance.val.b ? localcopy[id_resoa].f : localcopy[id_resob].f,
-            static_cast<FilterType>(scene->filterunit[1].type.val.i),
-            static_cast<FilterSubType>(scene->filterunit[1].subtype.val.i), storage,
-            scene->filterunit[1].cutoff.extend_range);
+        CM[1].MakeCoeffs(cutoffs[1],
+                         scene->f2_link_resonance.val.b ? localcopy[id_resoa].f
+                                                        : localcopy[id_resob].f,
+                         static_cast<FilterType>(scene->filterunit[1].type.val.i),
+                         static_cast<FilterSubType>(scene->filterunit[1].subtype.val.i), storage,
+                         scene->filterunit[1].cutoff.extend_range);
 
         for (int u = 0; u < n_filterunits_per_scene; u++)
         {

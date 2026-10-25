@@ -4704,6 +4704,89 @@ void SurgeSynthesizer::enqueueFXOff(int whichFX)
     load_fx_needed = true;
 }
 
+SurgeVoice *SurgeSynthesizer::newestDisplayVoice(int scene)
+{
+    SurgeVoice *newest{nullptr};
+    for (auto *voice : voices[scene])
+    {
+        if (!newest || (voice->state.gate && !newest->state.gate) ||
+            (voice->state.gate == newest->state.gate && voice->age <= newest->age))
+            newest = voice;
+    }
+    return newest;
+}
+
+void SurgeSynthesizer::publishParameterDisplayState()
+{
+    auto &display = parameterDisplayState;
+    if (display.request.load(std::memory_order_relaxed) == 0)
+        return;
+    auto scene = display.request.exchange(0, std::memory_order_relaxed) - 1;
+    if (scene < 0 || scene >= n_scenes)
+        return;
+
+    auto generation = display.generation.load(std::memory_order_relaxed) + 1;
+    if (generation == 0)
+        generation = 1;
+    auto &patch = storage.getPatch();
+    auto publish = [&](int id, float value) {
+        auto *p = patch.param_ptr[id];
+        if (p->valtype == vt_float && std::isfinite(value))
+            display.publish(id, generation, value);
+    };
+
+    for (const auto &routing : patch.modulation_global)
+        if (!routing.muted && routing.depth != 0.f)
+            publish(routing.destination_id, patch.globaldata[routing.destination_id].f);
+
+    if (patch.scenemode.val.i != sm_single || patch.scene_active.val.i == scene)
+    {
+        auto &sc = patch.scene[scene];
+        auto *voice = newestDisplayVoice(scene);
+        auto *values = voice ? voice->localcopy : patch.scenedata[scene];
+        std::bitset<n_scene_params> targets;
+        for (const auto &routing : sc.modulation_scene)
+            if (!routing.muted && routing.depth != 0.f)
+                targets.set(routing.destination_id);
+        if (voice)
+            for (const auto &routing : sc.modulation_voice)
+                if (!routing.muted && routing.depth != 0.f)
+                    targets.set(routing.destination_id);
+
+        auto base = n_global_params + scene * n_scene_params;
+        for (int i = 0; i < n_scene_params; ++i)
+            if (targets.test(i))
+                publish(base + i, values[i].f);
+
+        // These are built-in modulation paths, outside the modulation matrix.
+        // Use the same cutoff calculation as the filter coefficient maker.
+        if (voice)
+        {
+            auto cutoffs = voice->filterCutoffs();
+            for (int i = 0; i < n_filterunits_per_scene; ++i)
+            {
+                auto &filter = sc.filterunit[i];
+                if (filter.type.val.i != 0 && (targets.test(filter.cutoff.param_id_in_scene) ||
+                                               values[filter.keytrack.param_id_in_scene].f != 0.f ||
+                                               values[filter.envmod.param_id_in_scene].f != 0.f))
+                {
+                    // The offset slider's scale is relative to filter 1, in semitones.
+                    auto value = cutoffs[i];
+                    if (i == 1 && sc.f2_cutoff_is_offset.val.b)
+                        value -= cutoffs[0];
+                    publish(filter.cutoff.id, value);
+                }
+            }
+            if (sc.f2_link_resonance.val.b &&
+                (targets.test(sc.filterunit[0].resonance.param_id_in_scene) ||
+                 targets.test(sc.filterunit[1].resonance.param_id_in_scene)))
+                publish(sc.filterunit[1].resonance.id,
+                        values[sc.filterunit[0].resonance.param_id_in_scene].f);
+        }
+    }
+    display.generation.store(generation, std::memory_order_release);
+}
+
 void SurgeSynthesizer::publishLFODisplayState()
 {
     if (lfoDisplayState.request.load(std::memory_order_relaxed) == 0)
@@ -4723,13 +4806,7 @@ void SurgeSynthesizer::publishLFODisplayState()
         // Unused voice LFOs (apart from LFO1) are intentionally not processed.
         if (lfo == 0 || sc.modsource_doprocess[ms_lfo1 + lfo])
         {
-            SurgeVoice *newest{nullptr};
-            for (auto *voice : voices[scene])
-            {
-                if (!newest || (voice->state.gate && !newest->state.gate) ||
-                    (voice->state.gate == newest->state.gate && voice->age <= newest->age))
-                    newest = voice;
-            }
+            auto *newest = newestDisplayVoice(scene);
             if (newest)
                 source = static_cast<LFOModulationSource *>(newest->modsources[ms_lfo1 + lfo]);
         }
@@ -5242,6 +5319,7 @@ void SurgeSynthesizer::process()
     }
 
     publishLFODisplayState();
+    publishParameterDisplayState();
     storage.modRoutingMutex.unlock();
     storage.activeVoiceCount = vcount;
 

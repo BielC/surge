@@ -134,6 +134,10 @@ struct ModulatableSlider : public juce::Component,
     }
 
     float value{0.f};
+    // UI-only state; never changes the parameter's base value or modulation depth.
+    float liveModulatedValue{0.f};
+    bool liveModulatedValueValid{false};
+    void setLiveModulatedValue(float normalized);
     float getValue() const override { return value; }
     void setValue(float f) override
     {

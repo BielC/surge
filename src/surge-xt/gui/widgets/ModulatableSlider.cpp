@@ -47,6 +47,19 @@ ModulatableSlider::ModulatableSlider() : juce::Component(), WidgetBaseMixin<Modu
 
 ModulatableSlider::~ModulatableSlider() {}
 
+void ModulatableSlider::setLiveModulatedValue(float normalized)
+{
+    auto valid = std::isfinite(normalized);
+    auto value = valid ? std::clamp(normalized, 0.f, 1.f) : 0.f;
+    if (valid != liveModulatedValueValid ||
+        (valid && std::abs(value - liveModulatedValue) > 0.0001f))
+    {
+        liveModulatedValueValid = valid;
+        liveModulatedValue = value;
+        repaint();
+    }
+}
+
 void ModulatableSlider::updateLocationState()
 {
     /*
@@ -227,6 +240,19 @@ void ModulatableSlider::paint(juce::Graphics &g)
         g.drawLine(barFM0X + dLX, barFM0Y + dLY, barFMNX + dLX, barFMNY + dLY, 2);
     }
 
+    if (liveModulatedValueValid && !forceModHandle && activationOpacity == 1.f)
+    {
+        juce::Graphics::ScopedSaveState gs(g);
+        g.addTransform(trayPosition);
+        auto x = orientation == ParamConfig::kHorizontal ? range * liveModulatedValue + handleX0
+                                                         : handleCX;
+        auto y = orientation == ParamConfig::kVertical
+                     ? (1.f - liveModulatedValue) * range + handleY0
+                     : handleCY;
+        g.setColour(skin->getColor(Colors::Slider::Modulation::Positive).withAlpha(0.8f));
+        g.drawLine(handleCX, handleCY, x, y, 2.f);
+    }
+
     // Draw the label
     if (drawLabel)
     {
@@ -300,6 +326,21 @@ void ModulatableSlider::paint(juce::Graphics &g)
 
         if (isHovered && isTemposync && pTempoSyncHoverHandle)
             pTempoSyncHoverHandle->draw(g, activationOpacity, t);
+    }
+    // Keep the live dot visible even when it coincides with a handle.
+    if (liveModulatedValueValid && !forceModHandle && activationOpacity == 1.f)
+    {
+        juce::Graphics::ScopedSaveState gs(g);
+        g.addTransform(trayPosition);
+        auto x = orientation == ParamConfig::kHorizontal ? range * liveModulatedValue + handleX0
+                                                         : handleCX;
+        auto y = orientation == ParamConfig::kVertical
+                     ? (1.f - liveModulatedValue) * range + handleY0
+                     : handleCY;
+        g.setColour(juce::Colours::black.withAlpha(0.9f));
+        g.fillEllipse(x - 3.5f, y - 3.5f, 7.f, 7.f);
+        g.setColour(skin->getColor(Colors::Slider::Modulation::Positive).withAlpha(1.f));
+        g.fillEllipse(x - 2.5f, y - 2.5f, 5.f, 5.f);
     }
 }
 

@@ -175,6 +175,31 @@ class alignas(16) SurgeSynthesizer
     } lfoDisplayState;
     void publishLFODisplayState();
 
+    // Only the audio thread reads voice data. Each packed value is tagged with its
+    // refresh generation so removed routings and partial refreshes cannot leave a marker behind.
+    struct ParameterDisplayState
+    {
+        std::atomic<int> request{0}; // selected scene + 1, zero when no editor requests a refresh
+        std::array<std::atomic<uint64_t>, n_total_params> snapshots{};
+        std::atomic<uint32_t> generation{0};
+
+        void publish(int id, uint32_t generation, float value)
+        {
+            uint32_t bits;
+            std::memcpy(&bits, &value, sizeof(bits));
+            snapshots[id].store((uint64_t(generation) << 32) | bits, std::memory_order_relaxed);
+        }
+        float value(int id, uint32_t generation) const
+        {
+            auto sample = snapshots[id].load(std::memory_order_relaxed);
+            return generation != 0 && uint32_t(sample >> 32) == generation
+                       ? LFODisplayState::value(sample)
+                       : std::numeric_limits<float>::quiet_NaN();
+        }
+    } parameterDisplayState;
+    SurgeVoice *newestDisplayVoice(int scene);
+    void publishParameterDisplayState();
+
     PluginLayer *getParent();
 
     // protected:
